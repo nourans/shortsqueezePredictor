@@ -55,4 +55,4 @@ for file in os.listdir("./"):
 
 # # Print the resulting array
 # print(f"{symbol}")
-#
+# print(globals()[symbol])
