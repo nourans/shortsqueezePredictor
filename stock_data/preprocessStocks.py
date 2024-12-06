@@ -18,9 +18,9 @@ def extractData(fileName):
 
 
 
-for file in os.listdir("./"):
+for file in os.listdir("../"):
     if file.endswith(".json"):
-        file_path = os.path.join("./", file)
+        file_path = os.path.join("../", file)
         try:
             symbol, array = extractData(file)
             output_file_name = f"{symbol}_DataProcessed.json"
