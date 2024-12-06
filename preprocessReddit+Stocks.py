@@ -1,46 +1,33 @@
-import numpy as np
-import pandas as pd
 import json
 import re
-import torch
-#from preprocessStocks import extractData() # maybe... for combining datasets for each stock in one total dataset
-from textblob import TextBlob
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-from sklearn.preprocessing import StandardScaler
-from torch.utils.data import DataLoader, TensorDataset
 
+import numpy as np
+import pandas as pd
+from keras.src.layers import Dense
+from matplotlib import pyplot as plt
+from sklearn.preprocessing import StandardScaler
+from tcn import TCN
+from tensorflow.keras import Sequential
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 
 # Initialize VADER Sentiment Analyzer
 analyzer = SentimentIntensityAnalyzer()
 
-reddit_file_path = 'WSB_data/amc.csv'
+################### GME Data #####################
+
+# Load GME Reddit data
+reddit_file_path = 'WSB_data/gamestop.csv'
 reddit_data = pd.read_csv(reddit_file_path)
 
-# CHECKPOINT: inspect the first few rows of the Reddit data
-# print("Reddit Data Preview:")
-# print(reddit_data.head())
-
-# # CHECKPOINT: Check Reddit data structure
-# print("\nReddit Data Info:")
-# print(reddit_data.info())
-
-# # CHECKPOINT: Check for missing values in Reddit data
-# print("\nMissing Values in Reddit Data:")
-# print(reddit_data.isnull().sum())
-
-# Drop unnecessary columns from the Reddit data (e.g., usernames, URLs)
+# Drop unnecessary columns from the Reddit data
 reddit_cleaned = reddit_data.drop(columns=['username', 'URL', 'body'], errors='ignore')
 
-# Drop unnecessary columns from the Reddit data (e.g., usernames, URLs)
-reddit_cleaned = reddit_data.drop(columns=['username', 'reddit_url', 'other_links'], errors='ignore')
+# Filter for posts mentioning the stock (e.g., "GME") in the title or selftext
+reddit_cleaned = reddit_cleaned[
+    reddit_cleaned['title'].str.contains(r'\bGME\b', flags=re.IGNORECASE, regex=True, na=False)]
 
-# Filter for posts mentioning the stock (e.g., "AMC") in the title or selftext
-reddit_cleaned = reddit_cleaned[reddit_cleaned['title'].str.contains(r'\bAMC\b', flags=re.IGNORECASE, regex=True, na=False)]
-
-# Add sentiment analysis for each post (textblob or VADER)
-# reddit_cleaned['sentiment'] = reddit_cleaned['title'].apply(lambda x: TextBlob(x).sentiment.polarity) # textblob
-# VADER
+# Add sentiment analysis
 reddit_cleaned['sentiment'] = reddit_cleaned['title'].apply(
     lambda x: analyzer.polarity_scores(x)['compound']  # Use 'compound' as overall sentiment score
 )
@@ -48,71 +35,35 @@ reddit_cleaned['sentiment'] = reddit_cleaned['title'].apply(
 # Convert the 'date' column to datetime format
 reddit_cleaned['date'] = pd.to_datetime(reddit_cleaned['date'], errors='coerce')
 
-# Check for invalid dates
-if reddit_cleaned['date'].isnull().any():
-    print("Warning: Some rows have invalid dates and will be dropped.")
-    reddit_cleaned = reddit_cleaned.dropna(subset=['date'])
+# Drop rows with invalid dates
+reddit_cleaned = reddit_cleaned.dropna(subset=['date'])
 
 # Group by date and calculate daily metrics
 reddit_grouped = reddit_cleaned.groupby(reddit_cleaned['date'].dt.date).agg(
-    mention_count=('score', 'count'),    # Total number of posts (mention count)
-    average_score=('score', 'mean'),     # Average score of posts per day
+    mention_count=('score', 'count'),  # Total number of posts (mention count)
+    average_score=('score', 'mean'),  # Average score of posts per day
     average_sentiment=('sentiment', 'mean')  # Average sentiment
 ).reset_index()
 
 # Convert date back to datetime format
 reddit_grouped['date'] = pd.to_datetime(reddit_grouped['date'])
 
-# # CHECKPOINT: Print so far
-# print("\nCleaned Reddit Data Preview:")
-# print(reddit_grouped.head(50))
-
-
-################### Stocks #####################
-
-stock_file_path = 'AMC_DataProcessed.json'
+# Load GME stock data
+stock_file_path = 'GME_DataProcessed.json'
 with open(stock_file_path, 'r') as json_file:
     stock_data = json.load(json_file)
 
-# Convert the stock data to a pandas DataFrame
 stock_df = pd.DataFrame(stock_data, columns=['date', 'price', 'volume'])
-
-# Convert 'date' to datetime
 stock_df['date'] = pd.to_datetime(stock_df['date'], errors='coerce')
+stock_df = stock_df.dropna(subset=['date']).drop_duplicates(subset=['date'])
 
-# # CHECKPINT: Inspect the data
-# print(stock_df.head())
-# print(stock_df.info())
-
-# Check for missing or invalid rows
-if stock_df['date'].isnull().any():
-    print("Warning: Some stock data rows have invalid dates and will be dropped.")
-    stock_df = stock_df.dropna(subset=['date'])
-
-# Ensure no duplicate dates
-stock_df = stock_df.drop_duplicates(subset=['date'])
-
-# # CHECKPOINT: Check for other anomalies 
-# print(stock_df.describe())
-
-# Ensure both stock_df and reddit_grouped are indexed by 'date'
-stock_df['date'] = pd.to_datetime(stock_df['date'])
-reddit_grouped['date'] = pd.to_datetime(reddit_grouped['date'])
-
-###################### Merged #######################
-
-# Merge Reddit and stock data
+# Merge GME Reddit and stock data
 combined_data = pd.merge(reddit_grouped, stock_df, on='date', how='inner')
-
-# # CHECKPOINT: Inspect the combined dataset
-# print(combined_data.tail(50))
-
-# STEP 5
 
 # Calculate percentage change in price
 combined_data['price_change_pct'] = combined_data['price'].pct_change()
 
-# Calculate rolling average of volume (e.g., over 7 days)
+# Calculate rolling average of volume
 combined_data['volume_avg_7d'] = combined_data['volume'].rolling(window=7, min_periods=1).mean()
 
 # Define thresholds for short squeeze
@@ -121,119 +72,155 @@ volume_spike_threshold = 2  # Volume 2x the 7-day average
 
 # Identify short squeezes
 combined_data['squeeze_label'] = (
-    (combined_data['price_change_pct'] > price_spike_threshold) &
-    (combined_data['volume'] > volume_spike_threshold * combined_data['volume_avg_7d'])
+        (combined_data['price_change_pct'] > price_spike_threshold) &
+        (combined_data['volume'] > volume_spike_threshold * combined_data['volume_avg_7d'])
 ).astype(int)
 
-# Drop intermediate columns if not needed
+# Drop intermediate columns
 combined_data = combined_data.drop(columns=['price_change_pct', 'volume_avg_7d'], errors='ignore')
 
-# # CHECKPOINT: inspect the updated data
-# print("\nData with Squeeze Labels:")
-# print(combined_data.head(100))
-# print("\n data BEFORE normalization\n")
-# print(combined_data.describe())
-
-############### normalization 3################
-# Select features to normalize
+# Normalize GME data
 features_to_normalize = ['mention_count', 'average_score', 'average_sentiment', 'price', 'volume']
-
-# Z-Score normalization
 scaler = StandardScaler()
 normalized_features = scaler.fit_transform(combined_data[features_to_normalize])
-
-# Create a new DataFrame with normalized features
 normalized_data = pd.DataFrame(normalized_features, columns=features_to_normalize)
-
-# Add the 'date' and 'squeeze_label' columns back to the DataFrame
 normalized_data['date'] = combined_data['date']
 normalized_data['squeeze_label'] = combined_data['squeeze_label']
 
-# # CHECKPOINT: inspect mean and std of normalized features and then normalized data
-# import numpy as np
-# print("Means:", np.mean(normalized_features, axis=0))  # Should be close to 0
-# print("Standard Deviations:", np.std(normalized_features, axis=0))  # Should be close to 1
-# print("\nNormalized Data Preview:")
-# print(normalized_data.head(5))
-
-
-########### sequencing ###############
-# Define sequence length
+# Prepare GME sequences
 sequence_length = 30
-
-# Select features and target
 features = ['mention_count', 'average_score', 'average_sentiment', 'price', 'volume']
 target = 'squeeze_label'
 
-# Prepare the feature matrix and target vector
-X = []  # Input sequences
-y = []  # Corresponding targets
-
-# Iterate over the dataset using a sliding window
+X = []
+y = []
 for i in range(len(normalized_data) - sequence_length):
-    # Extract the sequence of features
     X.append(normalized_data[features].iloc[i:i + sequence_length].values)
-    
-    # Extract the target for the next day
     y.append(normalized_data[target].iloc[i + sequence_length])
 
-# Convert to NumPy arrays for machine learning models
 X = np.array(X)
 y = np.array(y)
 
-# CHECKPOINT: inspect the shapes
-print("Input shape (X):", X.shape)  # Should be (num_sequences, sequence_length, num_features)
-print("Target shape (y):", y.shape)  # Should be (num_sequences,)
+############# Train on GME Data ##################
 
+# Use entire GME dataset for training
+X_train, y_train = X, y
 
-############# train-test split ##################
+# Build TCN model
+model = Sequential([
+    TCN(input_shape=(sequence_length, X.shape[2]), return_sequences=False),
+    Dense(64, activation='relu'),
+    Dense(1, activation='sigmoid')  # Binary classification
+])
 
-# Split data into training, validation, and test sets based on time
-train_cutoff = int(len(X) * 0.7)  # 70% for training
-val_cutoff = int(len(X) * 0.85)  # 15% for validation, 15% for testing
+model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
 
-# Training set
-X_train = X[:train_cutoff]
-y_train = y[:train_cutoff]
+from sklearn.utils.class_weight import compute_class_weight
 
-# Validation set
-X_val = X[train_cutoff:val_cutoff]
-y_val = y[train_cutoff:val_cutoff]
+# Compute class weights
+class_weights = compute_class_weight(
+    class_weight='balanced',  # Automatically balance classes
+    classes=np.unique(y_train),  # Classes in the training set
+    y=y_train  # Labels for the training set
+)
 
-# Test set
-X_test = X[val_cutoff:]
-y_test = y[val_cutoff:]
+# Convert to dictionary format for Keras
+class_weights_dict = dict(enumerate(class_weights))
 
-# # CHECKPOINT: inspect the shapes
-# print("Training set shape (X_train, y_train):", X_train.shape, y_train.shape)
-# print("Validation set shape (X_val, y_val):", X_val.shape, y_val.shape)
-# print("Test set shape (X_test, y_test):", X_test.shape, y_test.shape)
+print("Class Weights:", class_weights_dict)
 
-############# tensor conversion ##################
+# Train the model with class weights
+history = model.fit(
+    X_train, y_train,
+    epochs=20,
+    batch_size=32,
+    verbose=1,
+    class_weight=class_weights_dict  # Use class weights here
+)
 
-# Convert data to PyTorch tensors
-X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
-y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
+################### AMC Data #####################
 
-X_val_tensor = torch.tensor(X_val, dtype=torch.float32)
-y_val_tensor = torch.tensor(y_val, dtype=torch.float32)
+# Load AMC Reddit data
+gamestop_reddit_file_path = 'WSB_data/amc.csv'
+gamestop_reddit_data = pd.read_csv(gamestop_reddit_file_path)
 
-X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
-y_test_tensor = torch.tensor(y_test, dtype=torch.float32)
+# Preprocess AMC Reddit data
+gamestop_reddit_cleaned = gamestop_reddit_data.drop(columns=['username', 'URL', 'body'], errors='ignore')
+gamestop_reddit_cleaned = gamestop_reddit_cleaned[
+    gamestop_reddit_cleaned['title'].str.contains(r'\bAMC\b', flags=re.IGNORECASE, regex=True, na=False)]
+gamestop_reddit_cleaned['sentiment'] = gamestop_reddit_cleaned['title'].apply(
+    lambda x: analyzer.polarity_scores(x)['compound']
+)
+gamestop_reddit_cleaned['date'] = pd.to_datetime(gamestop_reddit_cleaned['date'], errors='coerce')
+gamestop_reddit_cleaned = gamestop_reddit_cleaned.dropna(subset=['date'])
 
-# Create TensorDatasets for batching
-train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
-val_dataset = TensorDataset(X_val_tensor, y_val_tensor)
-test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
+gamestop_reddit_grouped = gamestop_reddit_cleaned.groupby(
+    gamestop_reddit_cleaned['date'].dt.date
+).agg(
+    mention_count=('score', 'count'),
+    average_score=('score', 'mean'),
+    average_sentiment=('sentiment', 'mean')
+).reset_index()
 
-# Create DataLoaders for the model
-batch_size = 32  # Define the batch size
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+gamestop_reddit_grouped['date'] = pd.to_datetime(gamestop_reddit_grouped['date'])
 
-# CHECKPOINT: ispect one batch
-for X_batch, y_batch in train_loader:
-    print("Batch shape (X, y):", X_batch.shape, y_batch.shape)
-    break
+# Load GameStop stock data
+gamestop_stock_file_path = 'AMC_DataProcessed.json'
+with open(gamestop_stock_file_path, 'r') as json_file:
+    gamestop_stock_data = json.load(json_file)
 
+gamestop_stock_df = pd.DataFrame(gamestop_stock_data, columns=['date', 'price', 'volume'])
+gamestop_stock_df['date'] = pd.to_datetime(gamestop_stock_df['date'], errors='coerce')
+gamestop_stock_df = gamestop_stock_df.dropna(subset=['date']).drop_duplicates(subset=['date'])
+
+# Merge AMC Reddit and stock data
+gamestop_combined_data = pd.merge(gamestop_reddit_grouped, gamestop_stock_df, on='date', how='inner')
+
+# Calculate percentage change and rolling average
+gamestop_combined_data['price_change_pct'] = gamestop_combined_data['price'].pct_change()
+gamestop_combined_data['volume_avg_7d'] = gamestop_combined_data['volume'].rolling(window=7, min_periods=1).mean()
+gamestop_combined_data['squeeze_label'] = (
+        (gamestop_combined_data['price_change_pct'] > price_spike_threshold) &
+        (gamestop_combined_data['volume'] > volume_spike_threshold * gamestop_combined_data['volume_avg_7d'])
+).astype(int)
+gamestop_combined_data = gamestop_combined_data.drop(columns=['price_change_pct', 'volume_avg_7d'], errors='ignore')
+
+# Normalize AMC data
+gamestop_normalized_features = scaler.transform(gamestop_combined_data[features_to_normalize])
+gamestop_normalized_data = pd.DataFrame(gamestop_normalized_features, columns=features_to_normalize)
+gamestop_normalized_data['date'] = gamestop_combined_data['date']
+gamestop_normalized_data['squeeze_label'] = gamestop_combined_data['squeeze_label']
+
+# Prepare AMC sequences
+X_gamestop = []
+y_gamestop = []
+
+print(gamestop_normalized_data.head())
+print(gamestop_normalized_data.shape)
+
+for i in range(len(gamestop_normalized_data) - sequence_length):
+    X_gamestop.append(gamestop_normalized_data[features].iloc[i:i + sequence_length].values)
+    y_gamestop.append(gamestop_normalized_data[target].iloc[i + sequence_length])
+
+X_gamestop = np.array(X_gamestop)
+y_gamestop = np.array(y_gamestop)
+
+################### Test on AMC Data #####################
+
+# Predict and evaluate on AMC data
+gamestop_predictions = model.predict(X_gamestop)
+binary_gamestop_predictions = (gamestop_predictions > 0.3).astype(int)
+
+gamestop_accuracy = np.mean(binary_gamestop_predictions.flatten() == y_gamestop)
+print(f"GameStop Test Accuracy: {gamestop_accuracy}")
+
+# Plot True vs Predicted Labels for AMC
+plt.figure(figsize=(12, 6))
+plt.plot(y_gamestop, label='True Labels', alpha=0.8)
+plt.plot(binary_gamestop_predictions, label='Predicted Labels', alpha=0.8, linestyle='--')
+plt.title('True vs Predicted Labels for AMC')
+plt.xlabel('Test Data Points')
+plt.ylabel('Labels')
+plt.legend()
+plt.grid(True)
+plt.show()
