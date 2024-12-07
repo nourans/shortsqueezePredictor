@@ -6,10 +6,9 @@ import pandas as pd
 from keras.src.layers import Dense
 from matplotlib import pyplot as plt
 from sklearn.preprocessing import StandardScaler
+from tcn import TCN
 from tensorflow.keras import Sequential
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-from tcn import TCN
-
 
 # Initialize VADER Sentiment Analyzer
 analyzer = SentimentIntensityAnalyzer()
@@ -207,17 +206,29 @@ y_amc = np.array(y_amc)
 # Predict and evaluate on AMC data
 amc_predictions = model.predict(X_amc)
 binary_amc_predictions = (amc_predictions > 0.3).astype(int)
-
 amc_accuracy = np.mean(binary_amc_predictions.flatten() == y_amc)
 print(f"GameStop Test Accuracy: {amc_accuracy}")
 
-# Plot True vs Predicted Labels for AMC
+# Ensure that dates align with the test sequences
+test_dates = amc_normalized_data['date'][sequence_length:].reset_index(drop=True)  # Align with sequences
+
+# Plot True vs Predicted Labels for AMC with dates on the x-axis
 plt.figure(figsize=(12, 6))
-plt.plot(y_amc, label='True Labels', alpha=0.8)
-plt.plot(binary_amc_predictions, label='Predicted Labels', alpha=0.8, linestyle='--')
+plt.scatter(test_dates, y_amc, label='True Labels', alpha=0.8, color='blue', marker='o')
+plt.scatter(test_dates, binary_amc_predictions, label='Predicted Labels', alpha=0.8, color='red', marker='x')
 plt.title('True vs Predicted Labels for AMC')
-plt.xlabel('Test Data Points')
+plt.xlabel('Dates')
 plt.ylabel('Labels')
+plt.xticks(rotation=45)
 plt.legend()
 plt.grid(True)
+plt.tight_layout()  # Adjust layout to fit rotated dates
 plt.show()
+
+from sklearn.metrics import classification_report, confusion_matrix
+
+print("Classification Report:")
+print(classification_report(y_amc, binary_amc_predictions))
+
+print("Confusion Matrix:")
+print(confusion_matrix(y_amc, binary_amc_predictions))
